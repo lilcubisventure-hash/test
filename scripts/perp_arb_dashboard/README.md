@@ -31,6 +31,8 @@ Funding spread compares the lowest normalized 8-hour funding rate with the highe
 
 Price dispersion compares the lowest midpoint price with the highest midpoint price for the same base symbol. The dashboard also shows the net funding impact if the low-price venue is bought and the high-price venue is sold.
 
+The `Alert Details` section lets you select a funding or price alert and inspect the legs, estimated cost impact, execution checks, and related raw rows before considering any manual action.
+
 ## Local Data
 
 Each refresh writes:
