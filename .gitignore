@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+scripts/perp_arb_dashboard/.venv/
+scripts/perp_arb_dashboard/data/*.csv
