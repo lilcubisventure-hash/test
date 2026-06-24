@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 import config
-from scanner import ScanResult, load_history_tail, run_scan, save_snapshot
+from scanner import ScanResult, load_history_tail, load_latest_snapshot, run_scan, save_snapshot
 
 
 st.set_page_config(page_title="Perp Arbitrage Dashboard", layout="wide")
@@ -20,19 +20,34 @@ def main() -> None:
     render_sidebar()
 
     refresh = st.sidebar.button("Refresh", type="primary", width=TABLE_WIDTH)
+    if "scan_result" not in st.session_state:
+        cached_result = load_latest_snapshot()
+        if cached_result is not None:
+            st.session_state["scan_result"] = cached_result
+            st.session_state["data_source"] = "Latest local snapshot"
+
     if refresh or "scan_result" not in st.session_state:
         with st.spinner("Scanning public exchange data..."):
             result = run_scan()
             save_snapshot(result.raw)
             st.session_state["scan_result"] = result
+            st.session_state["data_source"] = "Fresh public scan"
 
     result = st.session_state["scan_result"]
+    st.caption(f"Data source: {st.session_state.get('data_source', 'Current session')}")
     render_summary(result)
-    render_errors(result.errors)
-    render_alert_tables(result)
-    render_alert_details(result)
-    render_raw_table(result.raw)
-    render_history()
+    alerts_tab, details_tab, raw_tab, history_tab = st.tabs(
+        ["Alerts", "Alert Details", "Raw Cross-Section", "Local History"]
+    )
+    with alerts_tab:
+        render_errors(result.errors)
+        render_alert_tables(result)
+    with details_tab:
+        render_alert_details(result)
+    with raw_tab:
+        render_raw_table(result.raw)
+    with history_tab:
+        render_history()
 
 
 def render_sidebar() -> None:
