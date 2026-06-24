@@ -31,7 +31,11 @@ Funding spread compares the lowest normalized 8-hour funding rate with the highe
 
 Price dispersion compares the lowest midpoint price with the highest midpoint price for the same base symbol. The dashboard also shows the net funding impact if the low-price venue is bought and the high-price venue is sold.
 
-The `Alert Details` section lets you select a funding or price alert and inspect the legs, estimated cost impact, execution checks, and related raw rows before considering any manual action.
+The `Alert Details` section lets you select a funding or price alert and inspect the legs, live order book depth, automatic fee/slippage cost estimates, contract specs, execution checks, and related raw rows before considering any manual action.
+
+Order book depth is fetched on demand for the selected alert legs. The automatic cost model uses public market taker-fee metadata when available, current order book VWAP slippage for entry and exit sides, and an optional manual extra-cost buffer.
+
+Contract spec checks compare public market metadata such as quote/settle currency, contract size, linear/inverse flags, active status, and fee availability.
 
 ## Local Data
 
