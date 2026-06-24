@@ -82,9 +82,29 @@ def run_scan() -> ScanResult:
         errors.extend(exchange_errors)
 
     raw = pd.DataFrame(rows, columns=RAW_COLUMNS)
+    return build_scan_result(raw, errors)
+
+
+def build_scan_result(raw: pd.DataFrame, errors: list[str] | None = None) -> ScanResult:
+    """Calculate derived alert tables from a raw cross-section."""
+    raw = raw.copy()
+    for column in RAW_COLUMNS:
+        if column not in raw:
+            raw[column] = pd.NA
+    raw = raw[RAW_COLUMNS]
     funding_alerts = calculate_funding_spreads(raw)
     price_alerts = calculate_price_dispersions(raw)
-    return ScanResult(raw=raw, funding_alerts=funding_alerts, price_alerts=price_alerts, errors=errors)
+    return ScanResult(raw=raw, funding_alerts=funding_alerts, price_alerts=price_alerts, errors=errors or [])
+
+
+def load_latest_snapshot() -> ScanResult | None:
+    """Load the most recent local snapshot so the UI can render before a fresh scan."""
+    path = config.LATEST_SNAPSHOT_PATH
+    if not path.exists():
+        return None
+
+    raw = pd.read_csv(path)
+    return build_scan_result(raw)
 
 
 def scan_exchange(exchange_spec: dict[str, Any], timestamp: str) -> tuple[list[dict[str, Any]], list[str]]:
