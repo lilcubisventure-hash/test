@@ -45,6 +45,15 @@ The alert detail drilldown also includes signal lifecycle, pre-trade, and dry-ru
 
 The `Operations` tab keeps private account state explicitly empty until a private integration exists. Balance, margin, positions, and order capacity are shown as not connected. Monitoring controls expose local auto-refresh, alert dedup keys, and notification channel placeholders for Telegram, email, and desktop notifications. Those notification senders are not connected yet.
 
+The `Spot Hedge` tab supports a manual broker spot leg against public perp funding legs. Enter the broker, spot base, spot side, quantity, spot mark, broker cost, and financing/borrow APY. The dashboard then ranks CEX perp funding candidates for the hedge side:
+
+- long broker spot maps to short perp funding legs;
+- short broker spot maps to long perp funding legs;
+- positive funding carry is treated as income for the hedge leg;
+- candidate rows include funding carry, annualized carry, basis edge, one-time cost, expected 8h USD, estimated contract amount, and liquidity/spread status.
+
+An optional local DEX funding feed can be included from `data/manual_dex_funding.csv`. This is a public/manual data feed slot only; no wallet, private key, or on-chain transaction path is loaded.
+
 ## Local Data
 
 Each refresh writes:
@@ -53,6 +62,7 @@ Each refresh writes:
 data/latest_snapshot.csv
 data/snapshots.csv
 data/dry_run_audit_log.csv
+data/manual_dex_funding.csv
 ```
 
 Generated CSV files are ignored by git. The committed `data/.gitkeep` file keeps the directory present.
