@@ -26,6 +26,7 @@ from scanner import (
     run_scan,
     save_snapshot,
 )
+from spot_hedge import render_spot_hedge_panel
 
 
 st.set_page_config(page_title="Perp Arbitrage Dashboard", layout="wide")
@@ -54,14 +55,16 @@ def main() -> None:
     result = st.session_state["scan_result"]
     st.caption(f"Data source: {st.session_state.get('data_source', 'Current session')}")
     render_summary(result)
-    alerts_tab, details_tab, operations_tab, raw_tab, history_tab = st.tabs(
-        ["Alerts", "Alert Details", "Operations", "Raw Cross-Section", "Local History"]
+    alerts_tab, details_tab, spot_hedge_tab, operations_tab, raw_tab, history_tab = st.tabs(
+        ["Alerts", "Alert Details", "Spot Hedge", "Operations", "Raw Cross-Section", "Local History"]
     )
     with alerts_tab:
         render_errors(result.errors)
         render_alert_tables(result)
     with details_tab:
         render_alert_details(result)
+    with spot_hedge_tab:
+        render_spot_hedge_panel(result)
     with operations_tab:
         render_operations_panel(result)
     with raw_tab:
