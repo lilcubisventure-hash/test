@@ -44,7 +44,11 @@ RAW_COLUMNS = [
     "raw_funding_rate",
     "funding_8h_bps",
     "interval_hours",
+    "funding_timestamp",
     "minutes_to_funding",
+    "mark_price",
+    "index_price",
+    "premium_bps",
 ]
 
 FUNDING_ALERT_COLUMNS = [
@@ -212,7 +216,11 @@ def build_row(
     raw_funding_rate = to_float(funding.get("fundingRate"))
     interval_hours = parse_interval_hours(funding)
     funding_8h_bps = calculate_funding_8h_bps(raw_funding_rate, interval_hours)
+    funding_timestamp = calculate_funding_timestamp(funding)
     minutes_to_funding = calculate_minutes_to_funding(funding)
+    mark_price = funding_price(funding, "markPrice", "mark_price", "markPx")
+    index_price = funding_price(funding, "indexPrice", "index_price", "indexPx")
+    premium_bps = calculate_premium_bps(mark_price, index_price)
     metadata = contract_metadata(market)
 
     return {
@@ -232,7 +240,11 @@ def build_row(
         "raw_funding_rate": raw_funding_rate,
         "funding_8h_bps": funding_8h_bps,
         "interval_hours": interval_hours,
+        "funding_timestamp": funding_timestamp,
         "minutes_to_funding": minutes_to_funding,
+        "mark_price": mark_price,
+        "index_price": index_price,
+        "premium_bps": premium_bps,
     }
 
 
@@ -622,16 +634,47 @@ def parse_interval_value(value: Any) -> float | None:
 
 
 def calculate_minutes_to_funding(funding: dict[str, Any]) -> float:
-    timestamp = (
-        to_float(funding.get("nextFundingTimestamp"))
-        if funding.get("nextFundingTimestamp") is not None
-        else to_float(funding.get("fundingTimestamp"))
-    )
+    timestamp = calculate_funding_timestamp(funding)
     if math.isnan(timestamp):
         return math.nan
 
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
     return max(0.0, (timestamp - now_ms) / 60_000)
+
+
+def calculate_funding_timestamp(funding: dict[str, Any]) -> float:
+    candidates = [
+        funding.get("nextFundingTimestamp"),
+        funding.get("fundingTimestamp"),
+        funding.get("timestamp"),
+        nested_get(funding, "info", "nextFundingTimestamp"),
+        nested_get(funding, "info", "nextFundingTime"),
+        nested_get(funding, "info", "fundingTimestamp"),
+        nested_get(funding, "info", "fundingTime"),
+        nested_get(funding, "info", "fundingRateTimestamp"),
+    ]
+    for candidate in candidates:
+        timestamp = to_float(candidate)
+        if not math.isnan(timestamp):
+            return timestamp
+    return math.nan
+
+
+def funding_price(funding: dict[str, Any], *keys: str) -> float:
+    for key in keys:
+        value = to_float(funding.get(key))
+        if not math.isnan(value):
+            return value
+        value = to_float(nested_get(funding, "info", key))
+        if not math.isnan(value):
+            return value
+    return math.nan
+
+
+def calculate_premium_bps(mark_price: float, index_price: float) -> float:
+    if not (is_positive(mark_price) and is_positive(index_price)):
+        return math.nan
+    return (mark_price / index_price - 1) * 10000
 
 
 def nested_get(data: dict[str, Any], *keys: str) -> Any:
