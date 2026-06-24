@@ -37,6 +37,14 @@ Order book depth is fetched on demand for the selected alert legs. The automatic
 
 Contract spec checks compare public market metadata such as quote/settle currency, contract size, linear/inverse flags, active status, and fee availability.
 
+The alert detail drilldown also includes signal lifecycle, pre-trade, and dry-run execution views:
+
+- Lifecycle applies the configured open threshold, close threshold, funding pre-entry blackout, maximum hold time placeholder, and maximum-loss guard to the after-cost edge.
+- Pre-trade checks public mark/index/premium fields, funding timestamp, min/max order amount, min/max order cost, post-only/reduce-only status, order book depth, and circuit-breaker status.
+- Dry-run builds a simulated two-leg order plan, enforces a circuit breaker, keeps API scope at `trade_disabled`, and can write a local audit record.
+
+The `Operations` tab keeps private account state explicitly empty until a private integration exists. Balance, margin, positions, and order capacity are shown as not connected. Monitoring controls expose local auto-refresh, alert dedup keys, and notification channel placeholders for Telegram, email, and desktop notifications. Those notification senders are not connected yet.
+
 ## Local Data
 
 Each refresh writes:
@@ -44,10 +52,13 @@ Each refresh writes:
 ```text
 data/latest_snapshot.csv
 data/snapshots.csv
+data/dry_run_audit_log.csv
 ```
 
 Generated CSV files are ignored by git. The committed `data/.gitkeep` file keeps the directory present.
 
 ## Notes
 
-Apparent anomalies must be manually verified before any real decision. Check order book depth, mark price, index price, exchange status, borrow or margin constraints, fees, slippage, funding timestamp alignment, and real execution cost.
+Apparent anomalies must be manually verified before any real decision. Check order book depth, mark price, index price, premium, exchange status, borrow or margin constraints, fees, slippage, funding timestamp alignment, and real execution cost.
+
+The app remains dry-run only. It does not load private API keys, read account balances, read live positions, submit orders, cancel orders, or send Telegram/email/desktop notifications.
