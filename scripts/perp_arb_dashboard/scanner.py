@@ -16,9 +16,25 @@ import config
 
 RAW_COLUMNS = [
     "timestamp",
+    "exchange_id",
     "exchange",
+    "market_id",
     "symbol",
     "base",
+    "quote",
+    "settle",
+    "contract_size",
+    "linear",
+    "inverse",
+    "active",
+    "maker_fee_bps",
+    "taker_fee_bps",
+    "min_amount",
+    "max_amount",
+    "min_cost",
+    "max_cost",
+    "amount_precision",
+    "price_precision",
     "bid",
     "ask",
     "mid",
@@ -144,7 +160,7 @@ def scan_exchange(exchange_spec: dict[str, Any], timestamp: str) -> tuple[list[d
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{exchange_name} {symbol}: failed to fetch funding rate: {exc}")
 
-        rows.append(build_row(timestamp, exchange_name, symbol, base, ticker, funding))
+        rows.append(build_row(timestamp, exchange_spec["id"], exchange_name, market, symbol, base, ticker, funding))
 
     return rows, errors
 
@@ -156,6 +172,13 @@ def build_exchange(exchange_spec: dict[str, Any]) -> ccxt.Exchange:
         "options": exchange_spec.get("options", {}),
     }
     return exchange_class(params)
+
+
+def exchange_spec_by_name(exchange_name: str) -> dict[str, Any]:
+    for exchange_spec in config.EXCHANGES:
+        if exchange_spec["name"] == exchange_name:
+            return exchange_spec
+    raise KeyError(f"Unknown exchange: {exchange_name}")
 
 
 def is_target_linear_swap_market(market: dict[str, Any]) -> bool:
@@ -171,7 +194,9 @@ def is_target_linear_swap_market(market: dict[str, Any]) -> bool:
 
 def build_row(
     timestamp: str,
+    exchange_id: str,
     exchange_name: str,
+    market: dict[str, Any],
     symbol: str,
     base: str,
     ticker: dict[str, Any],
@@ -188,12 +213,16 @@ def build_row(
     interval_hours = parse_interval_hours(funding)
     funding_8h_bps = calculate_funding_8h_bps(raw_funding_rate, interval_hours)
     minutes_to_funding = calculate_minutes_to_funding(funding)
+    metadata = contract_metadata(market)
 
     return {
         "timestamp": timestamp,
+        "exchange_id": exchange_id,
         "exchange": exchange_name,
+        "market_id": market.get("id"),
         "symbol": symbol,
         "base": base,
+        **metadata,
         "bid": bid,
         "ask": ask,
         "mid": mid,
@@ -205,6 +234,155 @@ def build_row(
         "interval_hours": interval_hours,
         "minutes_to_funding": minutes_to_funding,
     }
+
+
+def contract_metadata(market: dict[str, Any]) -> dict[str, Any]:
+    precision = market.get("precision") or {}
+    limits = market.get("limits") or {}
+    amount_limits = limits.get("amount") or {}
+    cost_limits = limits.get("cost") or {}
+    contract_size = to_float(market.get("contractSize"))
+
+    return {
+        "quote": market.get("quote"),
+        "settle": market.get("settle"),
+        "contract_size": contract_size,
+        "linear": market.get("linear"),
+        "inverse": market.get("inverse"),
+        "active": market.get("active"),
+        "maker_fee_bps": fee_to_bps(market.get("maker")),
+        "taker_fee_bps": fee_to_bps(market.get("taker")),
+        "min_amount": to_float(amount_limits.get("min")),
+        "max_amount": to_float(amount_limits.get("max")),
+        "min_cost": to_float(cost_limits.get("min")),
+        "max_cost": to_float(cost_limits.get("max")),
+        "amount_precision": precision.get("amount"),
+        "price_precision": precision.get("price"),
+    }
+
+
+def fetch_order_book_depth(
+    exchange_name: str,
+    symbol: str,
+    target_notional: float,
+    limit: int = config.ORDER_BOOK_LIMIT,
+) -> list[dict[str, Any]]:
+    """Fetch public order book depth and estimate buy/sell slippage for one market."""
+    exchange_spec = exchange_spec_by_name(exchange_name)
+    try:
+        exchange = build_exchange(exchange_spec)
+        markets = exchange.load_markets()
+        market = markets.get(symbol) or exchange.market(symbol)
+        order_book = exchange.fetch_order_book(symbol, limit=limit)
+    except Exception as exc:  # noqa: BLE001 - public exchange failures should be visible, not fatal.
+        return [
+            depth_error_row(exchange_name, symbol, "buy", target_notional, str(exc)),
+            depth_error_row(exchange_name, symbol, "sell", target_notional, str(exc)),
+        ]
+
+    contract_size = to_float(market.get("contractSize"))
+    if math.isnan(contract_size) or contract_size <= 0:
+        contract_size = 1.0
+
+    bid = first_level_price(order_book.get("bids"))
+    ask = first_level_price(order_book.get("asks"))
+    mid = calculate_mid(bid, ask, math.nan)
+    return [
+        analyze_depth_side(exchange_name, symbol, "buy", order_book.get("asks") or [], mid, contract_size, target_notional),
+        analyze_depth_side(exchange_name, symbol, "sell", order_book.get("bids") or [], mid, contract_size, target_notional),
+    ]
+
+
+def analyze_depth_side(
+    exchange_name: str,
+    symbol: str,
+    side: str,
+    levels: list[list[float]],
+    mid: float,
+    contract_size: float,
+    target_notional: float,
+) -> dict[str, Any]:
+    remaining = max(0.0, target_notional)
+    filled_notional = 0.0
+    filled_base = 0.0
+    available_notional = 0.0
+    levels_used = 0
+
+    for raw_level in levels:
+        if len(raw_level) < 2:
+            continue
+        price = to_float(raw_level[0])
+        amount = to_float(raw_level[1])
+        if not is_positive(price) or not is_positive(amount):
+            continue
+
+        level_base = amount * contract_size
+        level_notional = price * level_base
+        available_notional += level_notional
+        if remaining <= 0:
+            continue
+
+        take_notional = min(level_notional, remaining)
+        filled_notional += take_notional
+        filled_base += take_notional / price
+        remaining -= take_notional
+        levels_used += 1
+
+    avg_price = filled_notional / filled_base if filled_base > 0 else math.nan
+    fill_ratio = filled_notional / target_notional if target_notional > 0 else math.nan
+    slippage_bps = calculate_depth_slippage_bps(side, avg_price, mid)
+    return {
+        "exchange": exchange_name,
+        "symbol": symbol,
+        "side": side,
+        "target_notional": target_notional,
+        "available_notional": available_notional,
+        "filled_notional": filled_notional,
+        "fill_pct": fill_ratio * 100 if not math.isnan(fill_ratio) else math.nan,
+        "avg_price": avg_price,
+        "mid": mid,
+        "slippage_bps": slippage_bps,
+        "levels_used": levels_used,
+        "status": "OK" if fill_ratio >= 1 else "Insufficient depth",
+        "error": "",
+    }
+
+
+def depth_error_row(exchange_name: str, symbol: str, side: str, target_notional: float, error: str) -> dict[str, Any]:
+    return {
+        "exchange": exchange_name,
+        "symbol": symbol,
+        "side": side,
+        "target_notional": target_notional,
+        "available_notional": math.nan,
+        "filled_notional": math.nan,
+        "fill_pct": math.nan,
+        "avg_price": math.nan,
+        "mid": math.nan,
+        "slippage_bps": math.nan,
+        "levels_used": 0,
+        "status": "Error",
+        "error": error,
+    }
+
+
+def first_level_price(levels: list[list[float]] | None) -> float:
+    if not levels:
+        return math.nan
+    return to_float(levels[0][0]) if levels[0] else math.nan
+
+
+def calculate_depth_slippage_bps(side: str, avg_price: float, mid: float) -> float:
+    if not is_positive(avg_price) or not is_positive(mid):
+        return math.nan
+    if side == "buy":
+        return max(0.0, (avg_price / mid - 1) * 10000)
+    return max(0.0, (mid / avg_price - 1) * 10000)
+
+
+def fee_to_bps(value: Any) -> float:
+    fee = to_float(value)
+    return math.nan if math.isnan(fee) else fee * 10000
 
 
 def calculate_funding_spreads(raw: pd.DataFrame) -> pd.DataFrame:
@@ -304,8 +482,8 @@ def save_snapshot(raw: pd.DataFrame) -> None:
     if raw.empty:
         return
 
-    header = not config.SNAPSHOTS_PATH.exists()
-    raw.to_csv(config.SNAPSHOTS_PATH, mode="a", header=header, index=False)
+    append = snapshot_schema_matches(raw)
+    raw.to_csv(config.SNAPSHOTS_PATH, mode="a" if append else "w", header=not append, index=False)
 
 
 def load_history_tail(limit: int = 200) -> pd.DataFrame:
@@ -313,10 +491,31 @@ def load_history_tail(limit: int = 200) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame(columns=RAW_COLUMNS)
 
-    history = pd.read_csv(path)
+    try:
+        history = pd.read_csv(path)
+    except pd.errors.ParserError:
+        return load_latest_raw()
     if history.empty:
         return history
     return history.tail(limit)
+
+
+def snapshot_schema_matches(raw: pd.DataFrame) -> bool:
+    path = config.SNAPSHOTS_PATH
+    if not path.exists():
+        return False
+    try:
+        existing_columns = list(pd.read_csv(path, nrows=0).columns)
+    except pd.errors.ParserError:
+        return False
+    return existing_columns == list(raw.columns)
+
+
+def load_latest_raw() -> pd.DataFrame:
+    path = config.LATEST_SNAPSHOT_PATH
+    if not path.exists():
+        return pd.DataFrame(columns=RAW_COLUMNS)
+    return pd.read_csv(path)
 
 
 def sort_alerts(alerts: pd.DataFrame, column: str) -> pd.DataFrame:
