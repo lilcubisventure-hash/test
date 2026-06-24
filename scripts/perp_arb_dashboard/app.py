@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pandas as pd
 import streamlit as st
 
 import config
+from execution_controls import (
+    funding_timestamp_present,
+    mark_index_present,
+    premium_within_guardrail,
+    render_dry_run_panel,
+    render_operations_panel,
+    render_pre_trade_panel,
+    render_signal_lifecycle,
+)
 from scanner import (
     ScanResult,
     fetch_order_book_depth,
@@ -24,7 +34,7 @@ TABLE_WIDTH = "stretch"
 
 def main() -> None:
     st.title("Perp Arbitrage Dashboard")
-    render_sidebar()
+    auto_refresh_enabled, auto_refresh_seconds = render_sidebar()
 
     refresh = st.sidebar.button("Refresh", type="primary", width=TABLE_WIDTH)
     if "scan_result" not in st.session_state:
@@ -33,31 +43,36 @@ def main() -> None:
             st.session_state["scan_result"] = cached_result
             st.session_state["data_source"] = "Latest local snapshot"
 
-    if refresh or "scan_result" not in st.session_state:
+    auto_refresh_scan = bool(st.session_state.pop("auto_refresh_scan", False))
+    if refresh or auto_refresh_scan or "scan_result" not in st.session_state:
         with st.spinner("Scanning public exchange data..."):
             result = run_scan()
             save_snapshot(result.raw)
             st.session_state["scan_result"] = result
-            st.session_state["data_source"] = "Fresh public scan"
+            st.session_state["data_source"] = "Auto-refresh public scan" if auto_refresh_scan else "Fresh public scan"
 
     result = st.session_state["scan_result"]
     st.caption(f"Data source: {st.session_state.get('data_source', 'Current session')}")
     render_summary(result)
-    alerts_tab, details_tab, raw_tab, history_tab = st.tabs(
-        ["Alerts", "Alert Details", "Raw Cross-Section", "Local History"]
+    alerts_tab, details_tab, operations_tab, raw_tab, history_tab = st.tabs(
+        ["Alerts", "Alert Details", "Operations", "Raw Cross-Section", "Local History"]
     )
     with alerts_tab:
         render_errors(result.errors)
         render_alert_tables(result)
     with details_tab:
         render_alert_details(result)
+    with operations_tab:
+        render_operations_panel(result)
     with raw_tab:
         render_raw_table(result.raw)
     with history_tab:
         render_history()
 
+    run_auto_refresh(auto_refresh_enabled, auto_refresh_seconds)
 
-def render_sidebar() -> None:
+
+def render_sidebar() -> tuple[bool, int]:
     st.sidebar.header("Config")
     st.sidebar.metric("Min quote volume", f"{config.MIN_QUOTE_VOLUME:,.0f}")
     st.sidebar.metric("Max bid/ask spread", f"{config.MAX_BID_ASK_SPREAD_BPS:,.0f} bps")
@@ -65,8 +80,31 @@ def render_sidebar() -> None:
     st.sidebar.metric("Price dispersion alert", f"{config.PRICE_DISPERSION_ALERT_BPS:,.0f} bps")
     st.sidebar.metric("Depth target", f"${config.DEFAULT_TARGET_NOTIONAL:,.0f}")
     st.sidebar.metric("Order book levels", f"{config.ORDER_BOOK_LIMIT:,}")
+    st.sidebar.metric("Open edge", f"{config.OPEN_EDGE_THRESHOLD_BPS:,.1f} bps")
+    st.sidebar.metric("Close edge", f"{config.CLOSE_EDGE_THRESHOLD_BPS:,.1f} bps")
+    st.sidebar.metric("Funding blackout", f"{config.FUNDING_ENTRY_BLACKOUT_MINUTES:,.0f} min")
+    st.sidebar.divider()
+    auto_refresh_enabled = st.sidebar.toggle("Auto refresh", value=False, key="auto_refresh_enabled")
+    auto_refresh_seconds = st.sidebar.number_input(
+        "Refresh seconds",
+        min_value=15,
+        max_value=3600,
+        value=config.AUTO_REFRESH_SECONDS,
+        step=15,
+        key="auto_refresh_seconds",
+    )
     st.sidebar.divider()
     st.sidebar.caption(f"Data path: {config.DATA_DIR}")
+    return auto_refresh_enabled, int(auto_refresh_seconds)
+
+
+def run_auto_refresh(enabled: bool, seconds: int) -> None:
+    if not enabled:
+        return
+    st.sidebar.caption(f"Auto refresh active: {seconds}s")
+    time.sleep(seconds)
+    st.session_state["auto_refresh_scan"] = True
+    st.rerun()
 
 
 def render_summary(result: ScanResult) -> None:
@@ -135,8 +173,19 @@ def render_funding_detail(result: ScanResult) -> None:
         target_notional=target_notional,
         extra_cost_bps=extra_cost_bps,
     )
-    overview, legs_tab, depth_tab, costs_tab, contracts_tab, checks_tab, raw_tab = st.tabs(
-        ["Overview", "Legs", "Depth", "Costs", "Contract specs", "Execution checks", "Raw rows"]
+    overview, legs_tab, depth_tab, costs_tab, contracts_tab, lifecycle_tab, pretrade_tab, dryrun_tab, checks_tab, raw_tab = st.tabs(
+        [
+            "Overview",
+            "Legs",
+            "Depth",
+            "Costs",
+            "Contract specs",
+            "Lifecycle",
+            "Pre-trade",
+            "Dry-run",
+            "Execution checks",
+            "Raw rows",
+        ]
     )
 
     with overview:
@@ -177,6 +226,12 @@ def render_funding_detail(result: ScanResult) -> None:
         st.dataframe(cost["breakdown"], width=TABLE_WIDTH, hide_index=True)
     with contracts_tab:
         st.dataframe(contract_specs(legs), width=TABLE_WIDTH, hide_index=True)
+    with lifecycle_tab:
+        render_signal_lifecycle("Funding spread", str(alert["base"]), legs, cost)
+    with pretrade_tab:
+        render_pre_trade_panel(legs, depth, cost, target_notional)
+    with dryrun_tab:
+        render_dry_run_panel("Funding spread", str(alert["base"]), legs, depth, cost, target_notional)
     with checks_tab:
         st.dataframe(funding_checks(alert, legs, depth, cost), width=TABLE_WIDTH, hide_index=True)
     with raw_tab:
@@ -214,8 +269,19 @@ def render_price_detail(result: ScanResult) -> None:
         target_notional=target_notional,
         extra_cost_bps=extra_cost_bps,
     )
-    overview, legs_tab, depth_tab, costs_tab, contracts_tab, checks_tab, raw_tab = st.tabs(
-        ["Overview", "Legs", "Depth", "Costs", "Contract specs", "Execution checks", "Raw rows"]
+    overview, legs_tab, depth_tab, costs_tab, contracts_tab, lifecycle_tab, pretrade_tab, dryrun_tab, checks_tab, raw_tab = st.tabs(
+        [
+            "Overview",
+            "Legs",
+            "Depth",
+            "Costs",
+            "Contract specs",
+            "Lifecycle",
+            "Pre-trade",
+            "Dry-run",
+            "Execution checks",
+            "Raw rows",
+        ]
     )
 
     with overview:
@@ -253,6 +319,12 @@ def render_price_detail(result: ScanResult) -> None:
         st.dataframe(cost["breakdown"], width=TABLE_WIDTH, hide_index=True)
     with contracts_tab:
         st.dataframe(contract_specs(legs), width=TABLE_WIDTH, hide_index=True)
+    with lifecycle_tab:
+        render_signal_lifecycle("Price dispersion", str(alert["base"]), legs, cost)
+    with pretrade_tab:
+        render_pre_trade_panel(legs, depth, cost, target_notional)
+    with dryrun_tab:
+        render_dry_run_panel("Price dispersion", str(alert["base"]), legs, depth, cost, target_notional)
     with checks_tab:
         st.dataframe(price_checks(alert, legs, depth, cost), width=TABLE_WIDTH, hide_index=True)
     with raw_tab:
@@ -387,6 +459,8 @@ def contract_specs(legs: pd.DataFrame) -> pd.DataFrame:
         "maker_fee_bps",
         "min_amount",
         "max_amount",
+        "min_cost",
+        "max_cost",
         "amount_precision",
         "price_precision",
     ]
@@ -454,7 +528,11 @@ def leg_table(raw: pd.DataFrame, specs: list[tuple[str, str, str]]) -> pd.DataFr
                 "quote_volume_24h": raw_value(row, "quote_volume_24h"),
                 "bid_ask_spread_bps": raw_value(row, "bid_ask_spread_bps"),
                 "funding_8h_bps": raw_value(row, "funding_8h_bps"),
+                "funding_timestamp": raw_value(row, "funding_timestamp"),
                 "minutes_to_funding": raw_value(row, "minutes_to_funding"),
+                "mark_price": raw_value(row, "mark_price"),
+                "index_price": raw_value(row, "index_price"),
+                "premium_bps": raw_value(row, "premium_bps"),
                 "quote": raw_value(row, "quote"),
                 "settle": raw_value(row, "settle"),
                 "contract_size": raw_value(row, "contract_size"),
@@ -465,6 +543,8 @@ def leg_table(raw: pd.DataFrame, specs: list[tuple[str, str, str]]) -> pd.DataFr
                 "maker_fee_bps": raw_value(row, "maker_fee_bps"),
                 "min_amount": raw_value(row, "min_amount"),
                 "max_amount": raw_value(row, "max_amount"),
+                "min_cost": raw_value(row, "min_cost"),
+                "max_cost": raw_value(row, "max_cost"),
                 "amount_precision": raw_value(row, "amount_precision"),
                 "price_precision": raw_value(row, "price_precision"),
             }
@@ -475,6 +555,7 @@ def leg_table(raw: pd.DataFrame, specs: list[tuple[str, str, str]]) -> pd.DataFr
 def funding_checks(alert: pd.Series, legs: pd.DataFrame, depth: pd.DataFrame, cost: dict[str, Any]) -> pd.DataFrame:
     checks = common_checks(legs, depth, cost)
     checks.insert(3, check("Funding timestamps aligned", funding_times_aligned(legs), "Large timing gaps can erase the edge."))
+    checks.insert(4, check("Funding timestamp present", funding_timestamp_present(legs), "Needed for the pre-funding blackout gate."))
     checks.append(manual("Same underlying risk", f"Confirm both {alert['base']} contracts reference the same exposure."))
     return pd.DataFrame(checks)
 
@@ -494,7 +575,12 @@ def common_checks(legs: pd.DataFrame, depth: pd.DataFrame, cost: dict[str, Any])
         check("Order book fetch succeeded", not depth_has_errors(depth), "Depth errors force fallback slippage estimates."),
         check("Automatic taker fees available", automatic_fee_available(legs), f"Fallback fee is {config.FALLBACK_TAKER_FEE_BPS:.2f} bps."),
         check("Expected edge remains after cost", cost["net_after_cost_bps"] > 0, "Negative values are not actionable."),
-        manual("Mark/index prices are consistent", "Check mark, index, and premium on both venues."),
+        check("Mark/index prices available", mark_index_present(legs), "Missing mark/index/premium requires manual venue verification."),
+        check(
+            "Premium below guardrail",
+            premium_within_guardrail(legs),
+            f"Absolute mark-index premium threshold: {config.MAX_MARK_INDEX_PREMIUM_BPS:g} bps.",
+        ),
     ]
     checks.extend(contract_checks(legs))
     return checks
