@@ -42,7 +42,31 @@ SPOT_HEDGE_DEFAULT_BROKER = "Manual broker"
 SPOT_HEDGE_DEFAULT_BROKER_COST_BPS = 2.0
 SPOT_HEDGE_DEFAULT_FINANCING_APY_PCT = 0.0
 SPOT_HEDGE_MIN_FUNDING_8H_BPS = 1.0
-SPOT_HEDGE_STOCK_BASES = ["NVDA", "TSLA", "AAPL", "MSTR", "ASML", "QQQ", "SPY", "MU", "MSFT", "GOOGL", "META"]
+SPOT_HEDGE_STOCK_BASES = [
+    "NVDA",
+    "TSLA",
+    "AAPL",
+    "MSTR",
+    "ASML",
+    "QQQ",
+    "SPY",
+    "MU",
+    "MSFT",
+    "GOOGL",
+    "META",
+    "AMZN",
+    "AMD",
+    "NFLX",
+    "ORCL",
+    "PLTR",
+    "HOOD",
+    "INTC",
+    "SP500",
+    "XYZ100",
+]
+
+BASE_PREFIX_ALIASES = ["XYZ-"]
+BASE_SUFFIX_ALIASES = ["STOCK"]
 
 TARGET_BASES = [
     "BTC",
@@ -66,6 +90,15 @@ TARGET_BASES = [
     "MSFT",
     "GOOGL",
     "META",
+    "AMZN",
+    "AMD",
+    "NFLX",
+    "ORCL",
+    "PLTR",
+    "HOOD",
+    "INTC",
+    "SP500",
+    "XYZ100",
 ]
 
 EXCHANGES = [
@@ -93,5 +126,27 @@ EXCHANGES = [
         "id": "kucoinfutures",
         "name": "KuCoin futures",
         "options": {},
+    },
+    {
+        "id": "mexc",
+        "name": "MEXC futures",
+        "options": {"defaultType": "swap"},
+    },
+    {
+        "id": "bitget",
+        "name": "Bitget futures",
+        "options": {"defaultType": "swap", "defaultSubType": "linear"},
+    },
+    {
+        "id": "hyperliquid",
+        "name": "Hyperliquid",
+        "aliases": ["tradeXYZ (Hyperliquid)"],
+        "options": {},
+        "display_name_rules": [
+            {
+                "base_prefix": "XYZ-",
+                "name": "tradeXYZ (Hyperliquid)",
+            }
+        ],
     },
 ]
