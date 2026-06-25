@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 import re
 from typing import Any
@@ -144,6 +144,11 @@ def scan_exchange(exchange_spec: dict[str, Any], timestamp: str) -> tuple[list[d
         for market in markets.values()
         if is_target_linear_swap_market(market)
     ]
+    matching_symbols = [market["symbol"] for market in matching_markets if market.get("symbol")]
+    tickers, ticker_errors = fetch_public_tickers(exchange, matching_symbols)
+    funding_rates, funding_errors = fetch_public_funding_rates(exchange, matching_symbols)
+    errors.extend(f"{exchange_name}: {error}" for error in ticker_errors)
+    errors.extend(f"{exchange_name}: {error}" for error in funding_errors)
 
     for market in matching_markets:
         symbol = market.get("symbol")
@@ -151,20 +156,23 @@ def scan_exchange(exchange_spec: dict[str, Any], timestamp: str) -> tuple[list[d
         if not symbol or not base:
             continue
 
-        ticker: dict[str, Any] = {}
-        try:
-            ticker = exchange.fetch_ticker(symbol)
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{exchange_name} {symbol}: failed to fetch ticker: {exc}")
-            continue
+        ticker = tickers.get(symbol) or {}
+        if not ticker:
+            try:
+                ticker = exchange.fetch_ticker(symbol)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{exchange_name} {symbol}: failed to fetch ticker: {exc}")
+                continue
 
-        funding: dict[str, Any] = {}
-        try:
-            funding = exchange.fetch_funding_rate(symbol)
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{exchange_name} {symbol}: failed to fetch funding rate: {exc}")
+        funding = funding_rates.get(symbol) or {}
+        funding_error = ""
+        if not funding:
+            funding, funding_error = fetch_public_funding(exchange, market, symbol, ticker)
+        row_exchange_name = display_exchange_name(exchange_spec, market)
+        if funding_error:
+            errors.append(f"{row_exchange_name} {symbol}: failed to fetch funding rate: {funding_error}")
 
-        rows.append(build_row(timestamp, exchange_spec["id"], exchange_name, market, symbol, base, ticker, funding))
+        rows.append(build_row(timestamp, exchange_spec["id"], row_exchange_name, market, symbol, base, ticker, funding))
 
     return rows, errors
 
@@ -180,9 +188,89 @@ def build_exchange(exchange_spec: dict[str, Any]) -> ccxt.Exchange:
 
 def exchange_spec_by_name(exchange_name: str) -> dict[str, Any]:
     for exchange_spec in config.EXCHANGES:
-        if exchange_spec["name"] == exchange_name:
+        exchange_names = [exchange_spec["name"], *exchange_spec.get("aliases", [])]
+        exchange_names.extend(rule.get("name") for rule in exchange_spec.get("display_name_rules", []))
+        if exchange_name in exchange_names:
             return exchange_spec
     raise KeyError(f"Unknown exchange: {exchange_name}")
+
+
+def display_exchange_name(exchange_spec: dict[str, Any], market: dict[str, Any]) -> str:
+    market_base = str(market.get("base") or "").upper()
+    for rule in exchange_spec.get("display_name_rules", []):
+        base_prefix = rule.get("base_prefix")
+        if base_prefix and market_base.startswith(str(base_prefix).upper()):
+            return rule["name"]
+    return exchange_spec["name"]
+
+
+def fetch_public_funding(
+    exchange: ccxt.Exchange,
+    market: dict[str, Any],
+    symbol: str,
+    ticker: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    try:
+        return exchange.fetch_funding_rate(symbol), ""
+    except Exception as exc:  # noqa: BLE001
+        fallback = public_funding_fallback(market, ticker)
+        if fallback:
+            return fallback, ""
+        return {}, str(exc)
+
+
+def fetch_public_tickers(exchange: ccxt.Exchange, symbols: list[str]) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    if not symbols or not exchange.has.get("fetchTickers"):
+        return {}, []
+    try:
+        tickers = exchange.fetch_tickers(symbols)
+    except Exception as exc:  # noqa: BLE001
+        return {}, [f"failed to bulk fetch tickers: {exc}"]
+    return {symbol: ticker for symbol, ticker in tickers.items() if symbol in symbols}, []
+
+
+def fetch_public_funding_rates(exchange: ccxt.Exchange, symbols: list[str]) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    if not symbols or not exchange.has.get("fetchFundingRates"):
+        return {}, []
+    try:
+        funding_rates = exchange.fetch_funding_rates(symbols)
+    except Exception as exc:  # noqa: BLE001
+        return {}, [f"failed to bulk fetch funding rates: {exc}"]
+    return {symbol: funding for symbol, funding in funding_rates.items() if symbol in symbols}, []
+
+
+def public_funding_fallback(market: dict[str, Any], ticker: dict[str, Any]) -> dict[str, Any]:
+    """Extract public funding fields from ticker or market metadata when CCXT lacks a standard endpoint."""
+    info_sources = [ticker.get("info"), market.get("info")]
+    for info in info_sources:
+        if not isinstance(info, dict):
+            continue
+        funding_rate = first_numeric(info, "funding", "fundingRate")
+        if math.isnan(funding_rate):
+            continue
+        interval = "1h" if is_hyperliquid_info(info) else config.DEFAULT_FUNDING_INTERVAL_HOURS
+        return {
+            "fundingRate": funding_rate,
+            "interval": interval,
+            "fundingTimestamp": next_interval_timestamp_ms(interval),
+            "markPrice": first_numeric(info, "markPx", "fairPrice"),
+            "indexPrice": first_numeric(info, "oraclePx", "idxPrice", "indexPrice"),
+            "info": info,
+        }
+    return {}
+
+
+def is_hyperliquid_info(info: dict[str, Any]) -> bool:
+    return "oraclePx" in info or "markPx" in info or bool(info.get("hip3"))
+
+
+def next_interval_timestamp_ms(interval: Any) -> int | None:
+    interval_hours = parse_interval_value(interval)
+    if interval_hours != 1:
+        return None
+    now = datetime.now(timezone.utc)
+    next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    return int(next_hour.timestamp() * 1000)
 
 
 def is_target_linear_swap_market(market: dict[str, Any]) -> bool:
@@ -218,8 +306,8 @@ def build_row(
     funding_8h_bps = calculate_funding_8h_bps(raw_funding_rate, interval_hours)
     funding_timestamp = calculate_funding_timestamp(funding)
     minutes_to_funding = calculate_minutes_to_funding(funding)
-    mark_price = funding_price(funding, "markPrice", "mark_price", "markPx")
-    index_price = funding_price(funding, "indexPrice", "index_price", "indexPx")
+    mark_price = funding_price(funding, "markPrice", "mark_price", "markPx", "fairPrice")
+    index_price = funding_price(funding, "indexPrice", "index_price", "indexPx", "idxPrice", "oraclePx")
     premium_bps = calculate_premium_bps(mark_price, index_price)
     metadata = contract_metadata(market)
 
@@ -539,7 +627,22 @@ def sort_alerts(alerts: pd.DataFrame, column: str) -> pd.DataFrame:
 def normalize_base(value: Any) -> str | None:
     if value is None:
         return None
-    return str(value).strip().upper()
+    text = str(value).strip().upper()
+    if text in config.TARGET_BASES:
+        return text
+    for prefix in config.BASE_PREFIX_ALIASES:
+        prefix = prefix.upper()
+        if text.startswith(prefix):
+            candidate = text.removeprefix(prefix)
+            if candidate in config.TARGET_BASES:
+                return candidate
+    for suffix in config.BASE_SUFFIX_ALIASES:
+        suffix = suffix.upper()
+        if text.endswith(suffix):
+            candidate = text.removesuffix(suffix)
+            if candidate in config.TARGET_BASES:
+                return candidate
+    return text
 
 
 def latest_timestamp(group: pd.DataFrame) -> str:
@@ -554,6 +657,14 @@ def to_float(value: Any) -> float:
     except (TypeError, ValueError):
         return math.nan
     return number if math.isfinite(number) else math.nan
+
+
+def first_numeric(data: dict[str, Any], *keys: str) -> float:
+    for key in keys:
+        value = to_float(data.get(key))
+        if not math.isnan(value):
+            return value
+    return math.nan
 
 
 def calculate_mid(bid: float, ask: float, last: float) -> float:
