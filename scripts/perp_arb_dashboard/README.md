@@ -1,8 +1,20 @@
 # Perp Arbitrage Dashboard
 
-This is a local Streamlit research dashboard for scanning public perpetual-contract market data across centralized exchanges. It collects ticker and funding-rate data for selected crypto, stock, and RWA-style perpetuals, normalizes funding to 8-hour basis points, calculates funding spreads, and checks cross-exchange price dispersion.
+This is a local Streamlit research dashboard for scanning public perpetual-contract market data across centralized exchanges and supported public onchain venues. It collects ticker and funding-rate data for selected crypto, stock, index, and RWA-style perpetuals, normalizes funding to 8-hour basis points, calculates funding spreads, and checks cross-exchange price dispersion.
 
 It does not trade, route orders, send alerts, use private API keys, or store credentials. It is research tooling only.
+
+Configured public venues:
+
+- Binance USD-M futures
+- Bybit
+- OKX
+- Gate.io
+- KuCoin futures
+- MEXC futures
+- Bitget futures
+- Hyperliquid
+- tradeXYZ markets on Hyperliquid
 
 ## Install
 
@@ -52,7 +64,7 @@ The `Spot Hedge` tab supports a manual broker spot leg against public perp fundi
 - positive funding carry is treated as income for the hedge leg;
 - candidate rows include funding carry, annualized carry, basis edge, one-time cost, expected 8h USD, estimated contract amount, and liquidity/spread status.
 
-An optional local DEX funding feed can be included from `data/manual_dex_funding.csv`. This is a public/manual data feed slot only; no wallet, private key, or on-chain transaction path is loaded.
+tradeXYZ markets are scanned through the public Hyperliquid CCXT adapter. An optional local DEX funding feed can still be included from `data/manual_dex_funding.csv` for venues that are not wired directly. This is a public/manual data feed slot only; no wallet, private key, or on-chain transaction path is loaded.
 
 ## Local Data
 
